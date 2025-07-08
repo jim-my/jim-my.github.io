@@ -3,6 +3,10 @@ languageCode = 'en-us'
 title = 'My New Hugo Site'
 theme = 'PaperMod'
 
+# Enable posts on homepage
+[pagination]
+  pagerSize = 5
+
 [params]
   # Theme configuration
   ShowReadingTime = true
@@ -15,9 +19,8 @@ theme = 'PaperMod'
   defaultTheme = "auto" # auto, light, dark
   disableThemeToggle = false
   
-  # Homepage configuration
-  homeInfoParams.Title = "Welcome to My Blog 👋"
-  homeInfoParams.Content = "This is my personal blog where I share thoughts and ideas."
+  # Homepage mode - show posts on homepage
+  env = "production"
   
   # Social icons
   [[params.socialIcons]]
