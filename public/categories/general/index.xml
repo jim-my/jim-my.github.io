@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>General on My New Hugo Site</title>
+    <link>https://jim-my.github.io/categories/general/</link>
+    <description>Recent content in General on My New Hugo Site</description>
+    <generator>Hugo -- 0.147.9</generator>
+    <language>en-us</language>
+    <lastBuildDate>Tue, 08 Jul 2025 23:17:24 +1000</lastBuildDate>
+    <atom:link href="https://jim-my.github.io/categories/general/index.xml" rel="self" type="application/rss+xml" />
+    <item>
+      <title>3</title>
+      <link>https://jim-my.github.io/posts/3/</link>
+      <pubDate>Tue, 08 Jul 2025 23:17:24 +1000</pubDate>
+      <guid>https://jim-my.github.io/posts/3/</guid>
+      <description>Add your description here</description>
+    </item>
+    <item>
+      <title>Testing New Archetype</title>
+      <link>https://jim-my.github.io/posts/testing-new-archetype/</link>
+      <pubDate>Tue, 08 Jul 2025 23:13:52 +1000</pubDate>
+      <guid>https://jim-my.github.io/posts/testing-new-archetype/</guid>
+      <description>Add your description here</description>
+    </item>
+    <item>
+      <title>My First Post</title>
+      <link>https://jim-my.github.io/posts/my-first-post/</link>
+      <pubDate>Thu, 27 Mar 2025 03:01:49 +1100</pubDate>
+      <guid>https://jim-my.github.io/posts/my-first-post/</guid>
+      <description>Welcome to my first blog post! Here I share some initial thoughts.</description>
+    </item>
+  </channel>
+</rss>

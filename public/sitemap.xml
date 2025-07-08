@@ -2,14 +2,52 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
-    <loc>https://jim-my.github.io/</loc>
-    <lastmod>2025-03-27T03:01:49+11:00</lastmod>
+    <loc>https://jim-my.github.io/posts/3/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
   </url><url>
-    <loc>https://jim-my.github.io/posts/</loc>
-    <lastmod>2025-03-27T03:01:49+11:00</lastmod>
+    <loc>https://jim-my.github.io/tags/blog/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
   </url><url>
     <loc>https://jim-my.github.io/categories/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/categories/general/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/posts/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/tags/tag3/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
   </url><url>
     <loc>https://jim-my.github.io/tags/</loc>
+    <lastmod>2025-07-08T23:17:24+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/posts/testing-new-archetype/</loc>
+    <lastmod>2025-07-08T23:13:52+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/tags/development/</loc>
+    <lastmod>2025-07-08T23:13:13+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/posts/my-second-post/</loc>
+    <lastmod>2025-07-08T23:13:13+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/categories/tech/</loc>
+    <lastmod>2025-07-08T23:13:13+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/tags/tutorial/</loc>
+    <lastmod>2025-07-08T23:13:13+10:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/tags/first-post/</loc>
+    <lastmod>2025-03-27T03:01:49+11:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/posts/my-first-post/</loc>
+    <lastmod>2025-03-27T03:01:49+11:00</lastmod>
+  </url><url>
+    <loc>https://jim-my.github.io/tags/welcome/</loc>
+    <lastmod>2025-03-27T03:01:49+11:00</lastmod>
   </url>
 </urlset>

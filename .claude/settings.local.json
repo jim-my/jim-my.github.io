@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(hugo:*)",
+      "Bash(git add:*)",
+      "Bash(git submodule:*)",
+      "Bash(ls:*)",
+      "Bash(pkill:*)",
+      "Bash(rm:*)"
+    ],
+    "deny": []
+  }
+}
