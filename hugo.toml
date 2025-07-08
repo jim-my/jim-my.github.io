@@ -2,3 +2,47 @@ baseURL = 'https://jim-my.github.io/'
 languageCode = 'en-us'
 title = 'My New Hugo Site'
 theme = 'PaperMod'
+
+[params]
+  # Theme configuration
+  ShowReadingTime = true
+  ShowShareButtons = true
+  ShowPostNavLinks = true
+  ShowBreadCrumbs = true
+  ShowCodeCopyButtons = true
+  ShowWordCount = true
+  ShowToc = true
+  defaultTheme = "auto" # auto, light, dark
+  disableThemeToggle = false
+  
+  # Homepage configuration
+  homeInfoParams.Title = "Welcome to My Blog 👋"
+  homeInfoParams.Content = "This is my personal blog where I share thoughts and ideas."
+  
+  # Social icons
+  [[params.socialIcons]]
+  name = "github"
+  url = "https://github.com"
+  
+  [[params.socialIcons]]
+  name = "twitter"
+  url = "https://twitter.com"
+
+[menu]
+  [[menu.main]]
+  identifier = "home"
+  name = "Home"
+  url = "/"
+  weight = 10
+  
+  [[menu.main]]
+  identifier = "posts"
+  name = "Posts"
+  url = "/posts/"
+  weight = 20
+  
+  [[menu.main]]
+  identifier = "tags"
+  name = "Tags"
+  url = "/tags/"
+  weight = 30
