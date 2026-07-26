@@ -1,13 +1,18 @@
 baseURL = 'https://jim-my.github.io/'
-languageCode = 'en-us'
 title = 'My New Hugo Site'
 theme = 'PaperMod'
+defaultContentLanguage = 'en'
+
+[languages.en]
+  languageCode = 'en-us'
+  weight = 1
 
 # Enable posts on homepage
 [pagination]
   pagerSize = 5
 
 [params]
+  author = "Jimmy"
   # Theme configuration
   ShowReadingTime = true
   ShowShareButtons = true
