@@ -1,0 +1,458 @@
+import base64
+import csv
+import datetime
+import decimal
+import io
+import json
+import math
+import os
+import pickle
+import re
+import time
+import duckdb
+
+class TypedCopy:
+
+    def __init__(self, path, wanted=True):
+        self.path, self.file, self.finished = (path, None, None)
+        if wanted:
+            try:
+                self.file = open(path, 'wb')
+            except OSError:
+                self.drop()
+        else:
+            self.drop()
+
+    def add(self, batch):
+        if self.file is not None:
+            try:
+                pickle.dump(batch, self.file)
+            except Exception:
+                self.drop()
+
+    def drop(self):
+        file, self.file, self.finished = (self.file, None, None)
+        try:
+            if file is not None:
+                file.close()
+        except Exception:
+            pass
+        try:
+            if os.path.exists(self.path):
+                os.remove(self.path)
+        except OSError:
+            pass
+
+    def finish(self):
+        file, self.file = (self.file, None)
+        if file is not None:
+            try:
+                file.close()
+                self.finished = self.path
+            except Exception:
+                self.drop()
+        return self.finished
+
+class DuckDBCSVTools:
+    PREVIEW_ROWS = 1000
+    XLSX_ROWS = 1048575
+    XLSX_COLUMNS = 16384
+    XLSX_TEXT = 32767
+    XLSX_DIGITS = 15
+    XLSX_LARGEST = 9.99999999999999e+307
+    XLSX_SMALLEST = 2.2250738585072014e-308
+
+    def __init__(self):
+        self.conn = duckdb.connect(':memory:')
+        self.tables = {}
+        self.sources = {}
+        self.counter = 0
+        self.result_id = 0
+        self.snapshot = None
+
+    def quote_identifier(self, value):
+        if not isinstance(value, str) or not value:
+            raise ValueError('SQL identifier must be a non-empty string')
+        return '"' + value.replace('"', '""') + '"'
+
+    def current_namespace(self):
+        return (self.conn.execute('SELECT current_database()').fetchone()[0], 'main')
+
+    def relation_key(self, name):
+        return (*self.current_namespace(), name)
+
+    def quote_relation(self, name):
+        return '.'.join((self.quote_identifier(part) for part in self.relation_key(name)))
+
+    def quote_literal(self, value):
+        if not isinstance(value, str):
+            raise TypeError('SQL literal must be a string')
+        return "'" + value.replace("'", "''") + "'"
+
+    def get_version(self):
+        return {'duckdb': duckdb.__version__, 'preview_rows': self.PREVIEW_ROWS}
+
+    def identifier_key(self, name):
+        return re.sub('[A-Z]', lambda match: match.group().lower(), name)
+
+    def new_name(self, filename, sheet=None, requested_name=None, reserved_names=None):
+        stem = os.path.splitext(filename)[0]
+        if sheet:
+            stem += '_' + sheet
+        stem = re.sub('[^a-zA-Z0-9_]', '_', stem).strip('_').lower() or 'table'
+        if stem[0].isdigit():
+            stem = 'table_' + stem
+        names = {self.identifier_key(name) for name in self.relation_catalog()}
+        names.update((self.identifier_key(row[0]) for row in self.conn.execute('SHOW TABLES').fetchall()))
+        if requested_name is not None:
+            self.quote_identifier(requested_name)
+            if len(requested_name) > 1000 or self.identifier_key(requested_name) in names:
+                raise ValueError('Saved table name is already in use or too long')
+            self.counter += 1
+            return (requested_name, self.counter)
+        names.update((self.identifier_key(name) for name in reserved_names or []))
+        name, suffix = (stem, 2)
+        while self.identifier_key(name) in names:
+            name = f'{stem}_{suffix}'
+            suffix += 1
+        self.counter += 1
+        return (name, self.counter)
+
+    def relation_catalog(self):
+        rows = self.conn.execute("\n            SELECT view_name, 'VIEW', view_oid FROM duckdb_views()\n            WHERE database_name = current_database() AND schema_name = 'main' AND NOT internal\n            UNION ALL\n            SELECT table_name, 'BASE TABLE', table_oid FROM duckdb_tables()\n            WHERE database_name = current_database() AND schema_name = 'main' AND NOT internal\n        ").fetchall()
+        return {name: (kind, oid) for name, kind, oid in rows}
+
+    def table_metadata(self, name, info, count_rows=True):
+        quoted = self.quote_relation(name)
+        if count_rows:
+            schema = self.conn.execute(f'DESCRIBE {quoted}').fetchall()
+        else:
+            schema = self.conn.execute("SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = current_database() AND schema_name = 'main' AND table_name = ? ORDER BY column_index", [name]).fetchall()
+        if info['file_type'] != 'sql':
+            info = dict(info, relation_oid=self.relation_catalog()[name][1])
+        return dict(info, database=self.current_namespace()[0], schema='main', columns=[row[0] for row in schema], types=[row[1] for row in schema], rows=self.conn.execute(f'SELECT count(*) FROM {quoted}').fetchone()[0] if count_rows else None)
+
+    def csv_select(self, path, options):
+        header = 'true' if options.get('has_headers', True) else 'false'
+        text = 'true' if options.get('all_varchar', False) else 'false'
+        delimiter = options.get('delimiter', '')
+        if delimiter and (not isinstance(delimiter, str) or len(delimiter) != 1):
+            raise ValueError('Delimiter must be one character')
+        delim_sql = f', delim={self.quote_literal(delimiter)}' if delimiter else ''
+        return f'read_csv({self.quote_literal(path)}, header={header}, auto_detect=true, all_varchar={text}{delim_sql})'
+
+    def load_csv_file(self, content, filename, options=None, requested_name=None, reserved_names=None, origin='file'):
+        path = None
+        created = False
+        try:
+            if origin not in ('file', 'sample'):
+                raise ValueError('Invalid source origin')
+            options = options or {}
+            name, source_id = self.new_name(filename, requested_name=requested_name, reserved_names=reserved_names)
+            path = f'/tmp/duck_source_{source_id}.csv'
+            with open(path, 'w', encoding='utf-8') as source:
+                source.write(content)
+            self.conn.execute(f'CREATE VIEW {self.quote_relation(name)} AS SELECT * FROM {self.csv_select(path, options)}')
+            created = True
+            info = self.table_metadata(name, {'filename': filename, 'file_type': 'csv', 'origin': origin, 'source_id': source_id, 'options': options, 'has_headers': options.get('has_headers', True)})
+            self.tables[self.relation_key(name)] = info
+            self.sources[source_id] = {'path': path}
+            return dict(info, success=True, table_name=name)
+        except Exception as error:
+            if path:
+                if created:
+                    self.conn.execute(f'DROP VIEW IF EXISTS {self.quote_relation(name)}')
+                if os.path.exists(path):
+                    os.remove(path)
+            return {'success': False, 'error': str(error)}
+
+    def load_excel_file(self, content, filename, requested_name=None, requested_sheet=None, reserved_names=None):
+        try:
+            import pandas as pd
+            data = bytes(content)
+            with pd.ExcelFile(io.BytesIO(data), engine='openpyxl') as book:
+                sheets = book.sheet_names
+                if not sheets:
+                    raise ValueError('Workbook has no worksheets')
+                sheet = requested_sheet or sheets[0]
+                if sheet not in sheets:
+                    raise ValueError(f'Saved worksheet {sheet!r} is not in this workbook')
+                frame = pd.read_excel(book, sheet_name=sheet)
+            name, source_id = self.new_name(filename, requested_name=requested_name, reserved_names=reserved_names)
+            self.create_excel_table(name, frame)
+            info = self.table_metadata(name, {'filename': filename, 'file_type': 'excel', 'origin': 'file', 'source_id': source_id, 'available_sheets': sheets, 'current_sheet': sheet})
+            self.tables[self.relation_key(name)] = info
+            self.sources[source_id] = {'bytes': data}
+            return dict(info, success=True, table_name=name)
+        except Exception as error:
+            return {'success': False, 'error': str(error)}
+
+    def create_excel_table(self, name, frame):
+        registration = '_duck_import_frame'
+        self.conn.register(registration, frame)
+        try:
+            self.conn.execute(f'CREATE TABLE {self.quote_relation(name)} AS SELECT * FROM {registration}')
+        finally:
+            self.conn.unregister(registration)
+
+    def load_additional_sheet(self, base_name, sheet, requested_name=None, reserved_names=None):
+        try:
+            import pandas as pd
+            self.get_table_info()
+            base = self.tables[self.relation_key(base_name)]
+            source_id = base['source_id']
+            if sheet not in base.get('available_sheets', []):
+                raise ValueError('Worksheet not found')
+            if any((info['source_id'] == source_id and info.get('current_sheet') == sheet for info in self.tables.values())):
+                raise ValueError('Worksheet is already loaded')
+            frame = pd.read_excel(io.BytesIO(self.sources[source_id]['bytes']), sheet_name=sheet, engine='openpyxl')
+            name, _ = self.new_name(base['filename'], sheet, requested_name, reserved_names)
+            self.create_excel_table(name, frame)
+            info = self.table_metadata(name, dict(base, current_sheet=sheet))
+            self.tables[self.relation_key(name)] = info
+            return dict(info, success=True, table_name=name)
+        except Exception as error:
+            return {'success': False, 'error': str(error)}
+
+    def reload_table_with_headers(self, name, has_headers):
+        try:
+            self.get_table_info()
+            info = self.tables[self.relation_key(name)]
+            if info['file_type'] != 'csv':
+                raise ValueError('Header settings apply to CSV files')
+            options = dict(info['options'], has_headers=bool(has_headers))
+            select = self.csv_select(self.sources[info['source_id']]['path'], options)
+            self.conn.execute(f'SELECT count(*) FROM {select}').fetchone()
+            self.conn.execute('BEGIN TRANSACTION')
+            try:
+                self.conn.execute(f'CREATE OR REPLACE VIEW {self.quote_relation(name)} AS SELECT * FROM {select}')
+                refreshed = self.table_metadata(name, dict(info, options=options, has_headers=bool(has_headers)))
+                self.conn.execute('COMMIT')
+            except Exception:
+                self.conn.execute('ROLLBACK')
+                raise
+            self.tables[self.relation_key(name)] = refreshed
+            return dict(refreshed, success=True, table_name=name)
+        except Exception as error:
+            return {'success': False, 'error': str(error)}
+
+    def drop_table(self, name):
+        try:
+            self.get_table_info()
+            info = self.tables[self.relation_key(name)]
+            kind = 'VIEW' if info['file_type'] == 'csv' else 'TABLE'
+            self.conn.execute(f'DROP {kind} {self.quote_relation(name)}')
+            del self.tables[self.relation_key(name)]
+            source_id = info['source_id']
+            if not any((item['source_id'] == source_id for item in self.tables.values())):
+                source = self.sources.pop(source_id)
+                if 'path' in source:
+                    os.remove(source['path'])
+            return {'success': True}
+        except Exception as error:
+            return {'success': False, 'error': str(error)}
+
+    def get_table_info(self):
+        namespace = self.current_namespace()
+        catalog = self.relation_catalog()
+        catalog_kinds = {name: identity[0] for name, identity in catalog.items()}
+        for key, info in list(self.tables.items()):
+            if key[:2] != namespace:
+                continue
+            expected_kind = 'VIEW' if info['file_type'] == 'csv' else 'BASE TABLE'
+            if catalog.get(key[2]) != (expected_kind, info['relation_oid']):
+                del self.tables[key]
+        tables = {}
+        for name, kind in catalog_kinds.items():
+            info = self.tables.get((*namespace, name), {'filename': 'Created with SQL', 'file_type': 'sql'})
+            tables[name] = info if info['file_type'] == 'csv' else self.table_metadata(name, info, count_rows=kind != 'VIEW')
+        return {'tables': tables, 'count': len(tables), 'database': namespace[0]}
+
+    def json_cell(self, value):
+        if isinstance(value, int) and (not isinstance(value, bool)) and (abs(value) > 9007199254740991):
+            return str(value)
+        if isinstance(value, (decimal.Decimal, datetime.date, datetime.time)):
+            return str(value)
+        if isinstance(value, float) and (not math.isfinite(value)):
+            return str(value)
+        if isinstance(value, bytes):
+            return value.hex()
+        if isinstance(value, (tuple, list)):
+            return [self.json_cell(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): self.json_cell(item) for key, item in value.items()}
+        if value is None or isinstance(value, (str, bool, int, float)):
+            return value
+        return str(value)
+
+    def neutralize_spreadsheet_formula(self, value):
+        if value is None:
+            return ''
+        text = str(value)
+        if text.startswith(('=', '+', '-', '@', '\t', '\r', '\n', '＝', '＋', '－', '＠')):
+            return "'" + text
+        return value
+
+    def preview_query(self, sql, limit=100):
+        started = time.perf_counter()
+        try:
+            if type(limit) is not int or not 1 <= limit <= self.PREVIEW_ROWS:
+                raise ValueError('Preview limit must be an integer from 1 to 1000.')
+            self.require_single_select(sql, 'Preview accepts one SELECT query. Use the SQL workbench for other statements.')
+            relation = self.conn.sql(sql).limit(limit + 1)
+            columns, types = (relation.columns, [str(value) for value in relation.types])
+            rows = relation.fetchall()
+            data = [[self.json_cell(value) for value in row] for row in rows[:limit]]
+            return {'success': True, 'columns': columns, 'types': types, 'data': data, 'rows': len(data), 'truncated': len(rows) > limit, 'query': sql, 'elapsed_ms': round((time.perf_counter() - started) * 1000)}
+        except Exception as error:
+            return {'success': False, 'error': str(error)}
+
+    def require_single_select(self, sql, message):
+        statements = self.conn.extract_statements(sql)
+        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+            raise ValueError(message)
+
+    def execute_recipe(self, sql):
+        return self._run(sql, single_select=True)
+
+    def execute_query(self, sql):
+        return self._run(sql)
+
+    def _run(self, sql, single_select=False):
+        started = time.perf_counter()
+        path = f'/tmp/duck_result_{self.result_id + 1}.csv'
+        typed = f'/tmp/duck_result_{self.result_id + 1}.rows'
+        copy = None
+        try:
+            if single_select:
+                self.require_single_select(sql, 'A recipe runs as one SELECT query. Use the SQL workbench for other statements.')
+            cursor = self.conn.execute(sql)
+            columns = [item[0] for item in cursor.description or []]
+            types = [str(item[1]) for item in cursor.description or []]
+            preview, count = ([], 0)
+            copy = TypedCopy(typed, wanted=len(columns) <= self.XLSX_COLUMNS)
+            with open(path, 'w', encoding='utf-8', newline='') as output:
+                writer = csv.writer(output, lineterminator='\r\n')
+                writer.writerow([self.neutralize_spreadsheet_formula(name) for name in columns])
+                while True:
+                    batch = cursor.fetchmany(512)
+                    if not batch:
+                        break
+                    if count + len(batch) > self.XLSX_ROWS:
+                        copy.drop()
+                    copy.add(batch)
+                    for row in batch:
+                        if count < self.PREVIEW_ROWS:
+                            preview.append([self.json_cell(value) for value in row])
+                        writer.writerow([self.neutralize_spreadsheet_formula(value) for value in row])
+                        count += 1
+            previous = self.snapshot
+            self.result_id += 1
+            self.snapshot = {'path': path, 'typed': copy.finish(), 'columns': columns, 'rows': count, 'id': self.result_id}
+            self.discard_snapshot(previous)
+            return {'success': True, 'columns': columns, 'types': types, 'data': preview, 'rows': count, 'truncated': count > self.PREVIEW_ROWS, 'query': sql, 'result_id': self.result_id, 'elapsed_ms': round((time.perf_counter() - started) * 1000)}
+        except Exception as error:
+            if copy is not None:
+                copy.drop()
+            self.discard_snapshot({'path': path})
+            return {'success': False, 'error': str(error)}
+
+    def discard_snapshot(self, snapshot):
+        snapshot = snapshot or {}
+        for name in (snapshot.get('path'), snapshot.get('typed')):
+            try:
+                if name and os.path.exists(name):
+                    os.remove(name)
+            except OSError:
+                pass
+
+    def excel_number(self, number):
+        return number == 0 or (math.isfinite(number) and self.XLSX_SMALLEST <= abs(number) <= self.XLSX_LARGEST)
+
+    def excel_cell(self, sheet, value, string_cell, illegal_characters, error_codes):
+        if value is None or isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value if abs(value) < 10 ** self.XLSX_DIGITS else str(value)
+        if isinstance(value, float):
+            return value if self.excel_number(value) else str(value)
+        if isinstance(value, decimal.Decimal):
+            return float(value) if value.is_finite() and len(value.as_tuple().digits) <= self.XLSX_DIGITS else str(value)
+        if isinstance(value, datetime.datetime):
+            return value if value.tzinfo is None and value.year >= 1900 and (value.microsecond % 1000 == 0) else value.isoformat(sep=' ')
+        if isinstance(value, datetime.date):
+            return value if value.year >= 1900 else value.isoformat()
+        if isinstance(value, datetime.time):
+            return value if value.tzinfo is None and value.microsecond % 1000 == 0 else value.isoformat()
+        text = value.hex() if isinstance(value, bytes) else value if isinstance(value, str) else str(value)
+        text = illegal_characters.sub('', text)
+        if len(text) > self.XLSX_TEXT:
+            raise ValueError(f'A cell holds more than {self.XLSX_TEXT:,} characters, which Excel cannot store. Use Download CSV instead.')
+        if text.startswith('=') or text in error_codes:
+            cell = string_cell(sheet, value=text)
+            cell.data_type = 's'
+            return cell
+        return text
+
+    def check_export_to_xlsx(self, result_id):
+        snapshot = self.snapshot
+        if not snapshot or snapshot['id'] != result_id:
+            return {'success': False, 'error': 'Result is no longer available. Run the query again.'}
+        if snapshot['rows'] > self.XLSX_ROWS or len(snapshot['columns']) > self.XLSX_COLUMNS:
+            return {'success': False, 'error': f"This result has {snapshot['rows']:,} rows and {len(snapshot['columns']):,} columns. One Excel sheet holds {self.XLSX_ROWS:,} rows below the header and {self.XLSX_COLUMNS:,} columns. Use Download CSV instead."}
+        if not snapshot['typed']:
+            return {'success': False, 'error': 'This result could not be prepared for Excel. Use Download CSV instead.'}
+        return {'success': True}
+
+    def export_to_xlsx(self, result_id):
+        check = self.check_export_to_xlsx(result_id)
+        if not check['success']:
+            return check
+        snapshot = self.snapshot
+        book = None
+        try:
+            from openpyxl import Workbook
+            from openpyxl.cell import WriteOnlyCell
+            from openpyxl.cell.cell import ERROR_CODES, ILLEGAL_CHARACTERS_RE
+            book = Workbook(write_only=True)
+            sheet = book.create_sheet('Result')
+            cell = lambda value: self.excel_cell(sheet, value, WriteOnlyCell, ILLEGAL_CHARACTERS_RE, ERROR_CODES)
+            sheet.append([cell(str(name)) for name in snapshot['columns']])
+            with open(snapshot['typed'], 'rb') as rows:
+                while True:
+                    try:
+                        batch = pickle.load(rows)
+                    except EOFError:
+                        break
+                    for row in batch:
+                        sheet.append([cell(value) for value in row])
+            output = io.BytesIO()
+            book.save(output)
+            return {'success': True, 'content_base64': base64.b64encode(output.getvalue()).decode('ascii'), 'rows': snapshot['rows']}
+        except Exception as error:
+            self.discard_workbook(book)
+            return {'success': False, 'error': str(error) or f'{type(error).__name__} while building the workbook. Use Download CSV instead.'}
+
+    def discard_workbook(self, book):
+        for sheet in book.worksheets if book is not None else ():
+            writer = getattr(sheet, '_writer', None)
+            if writer is not None:
+                for step in (sheet.close, writer.cleanup):
+                    try:
+                        step()
+                    except Exception:
+                        pass
+
+    def export_to_csv(self, result_id):
+        if not self.snapshot or self.snapshot['id'] != result_id:
+            return {'success': False, 'error': 'Result is no longer available. Run the query again.'}
+        with open(self.snapshot['path'], encoding='utf-8', newline='') as output:
+            return {'success': True, 'content': output.read(), 'rows': self.snapshot['rows']}
+csv_tools = DuckDBCSVTools()
+
+def worker_call(method, args_json):
+    allowed = {'get_version', 'load_csv_file', 'load_excel_file', 'load_additional_sheet', 'reload_table_with_headers', 'drop_table', 'get_table_info', 'preview_query', 'execute_query', 'execute_recipe', 'export_to_csv', 'check_export_to_xlsx', 'export_to_xlsx'}
+    if method not in allowed:
+        raise ValueError('Unknown engine operation')
+    result = getattr(csv_tools, method)(*json.loads(args_json))
+    return json.dumps(result, allow_nan=False)
