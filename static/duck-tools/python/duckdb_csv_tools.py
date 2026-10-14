@@ -315,10 +315,61 @@ class DuckDBCSVTools:
     def execute_recipe(self, sql):
         return self._run(sql, single_select=True)
 
+    def execute_recipe_stages(self, stages):
+        created, counts, began, committed = ([], [], False, False)
+        try:
+            self.conn.execute('BEGIN TRANSACTION')
+            began = True
+            if not isinstance(stages, list) or not stages or (not all((isinstance(item, list) and len(item) == 2 and isinstance(item[1], str) and (isinstance(item[0], str) or (index == 0 and item[0] is None)) for index, item in enumerate(stages)))):
+                raise ValueError('A staged recipe needs one name and query per step.')
+            names = {self.identifier_key(name) for name in self.relation_catalog()}
+            for index, (name, sql) in enumerate(stages[:-1]):
+                if name is not None and (not re.fullmatch('__+duck_stage_[0-9]+', name) or self.identifier_key(name) in names):
+                    raise ValueError('Invalid recipe stage name.')
+                try:
+                    self.require_single_select(sql, 'A recipe runs as one SELECT query per step. Use the SQL workbench for other statements.')
+                    if name is None:
+                        counts.append(self.conn.execute(f'SELECT count(*) FROM ({sql}) AS input').fetchone()[0])
+                        continue
+                    quoted = '"' + name + '"'
+                    self.conn.execute(f'CREATE OR REPLACE TEMP TABLE {quoted} AS {sql}')
+                    created.append(quoted)
+                    counts.append(self.conn.execute(f'SELECT count(*) FROM temp.main.{quoted}').fetchone()[0])
+                    while len(created) > 1:
+                        self.conn.execute(f'DROP TABLE IF EXISTS temp.main.{created[0]}')
+                        created.pop(0)
+                except Exception as error:
+                    return {'success': False, 'error': str(error), 'stage': index}
+
+            def finish():
+                nonlocal committed, finishing
+                finishing = True
+                for quoted in created:
+                    self.conn.execute(f'DROP TABLE IF EXISTS temp.main.{quoted}')
+                created.clear()
+                self.conn.execute('COMMIT')
+                committed = True
+            finishing = False
+            result = self._run(stages[-1][1], single_select=True, finish=finish)
+            if not result['success']:
+                if not finishing:
+                    result['stage'] = len(stages) - 1
+                return result
+            result['counts'] = counts + [result['rows']]
+            return result
+        except Exception as error:
+            return {'success': False, 'error': str(error)}
+        finally:
+            if began and (not committed):
+                try:
+                    self.conn.execute('ROLLBACK')
+                except Exception:
+                    pass
+
     def execute_query(self, sql):
         return self._run(sql)
 
-    def _run(self, sql, single_select=False):
+    def _run(self, sql, single_select=False, finish=None):
         started = time.perf_counter()
         path = f'/tmp/duck_result_{self.result_id + 1}.csv'
         typed = f'/tmp/duck_result_{self.result_id + 1}.rows'
@@ -346,6 +397,8 @@ class DuckDBCSVTools:
                             preview.append([self.json_cell(value) for value in row])
                         writer.writerow([self.neutralize_spreadsheet_formula(value) for value in row])
                         count += 1
+            if finish is not None:
+                finish()
             previous = self.snapshot
             self.result_id += 1
             self.snapshot = {'path': path, 'typed': copy.finish(), 'columns': columns, 'rows': count, 'id': self.result_id}
@@ -451,7 +504,7 @@ class DuckDBCSVTools:
 csv_tools = DuckDBCSVTools()
 
 def worker_call(method, args_json):
-    allowed = {'get_version', 'load_csv_file', 'load_excel_file', 'load_additional_sheet', 'reload_table_with_headers', 'drop_table', 'get_table_info', 'preview_query', 'execute_query', 'execute_recipe', 'export_to_csv', 'check_export_to_xlsx', 'export_to_xlsx'}
+    allowed = {'get_version', 'load_csv_file', 'load_excel_file', 'load_additional_sheet', 'reload_table_with_headers', 'drop_table', 'get_table_info', 'preview_query', 'execute_query', 'execute_recipe', 'execute_recipe_stages', 'export_to_csv', 'check_export_to_xlsx', 'export_to_xlsx'}
     if method not in allowed:
         raise ValueError('Unknown engine operation')
     result = getattr(csv_tools, method)(*json.loads(args_json))
