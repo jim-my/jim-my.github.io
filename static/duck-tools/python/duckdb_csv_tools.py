@@ -61,6 +61,7 @@ class DuckDBCSVTools:
     XLSX_DIGITS = 15
     XLSX_LARGEST = 9.99999999999999e+307
     XLSX_SMALLEST = 2.2250738585072014e-308
+    CLIPBOARD_CHARS = 10000000
 
     def __init__(self):
         self.conn = duckdb.connect(':memory:')
@@ -315,17 +316,21 @@ class DuckDBCSVTools:
     def execute_recipe(self, sql):
         return self._run(sql, single_select=True)
 
+    def check_stages(self, stages):
+        if not isinstance(stages, list) or not stages or (not all((isinstance(item, list) and len(item) == 2 and isinstance(item[1], str) and (isinstance(item[0], str) or (index == 0 and item[0] is None)) for index, item in enumerate(stages)))):
+            raise ValueError('A staged recipe needs one name and query per step.')
+        names = {self.identifier_key(name) for name in self.relation_catalog()}
+        for name, _ in stages[:-1]:
+            if name is not None and (not re.fullmatch('__+duck_stage_[0-9]+', name) or self.identifier_key(name) in names):
+                raise ValueError('Invalid recipe stage name.')
+
     def execute_recipe_stages(self, stages):
         created, counts, began, committed = ([], [], False, False)
         try:
             self.conn.execute('BEGIN TRANSACTION')
             began = True
-            if not isinstance(stages, list) or not stages or (not all((isinstance(item, list) and len(item) == 2 and isinstance(item[1], str) and (isinstance(item[0], str) or (index == 0 and item[0] is None)) for index, item in enumerate(stages)))):
-                raise ValueError('A staged recipe needs one name and query per step.')
-            names = {self.identifier_key(name) for name in self.relation_catalog()}
+            self.check_stages(stages)
             for index, (name, sql) in enumerate(stages[:-1]):
-                if name is not None and (not re.fullmatch('__+duck_stage_[0-9]+', name) or self.identifier_key(name) in names):
-                    raise ValueError('Invalid recipe stage name.')
                 try:
                     self.require_single_select(sql, 'A recipe runs as one SELECT query per step. Use the SQL workbench for other statements.')
                     if name is None:
@@ -501,10 +506,115 @@ class DuckDBCSVTools:
             return {'success': False, 'error': 'Result is no longer available. Run the query again.'}
         with open(self.snapshot['path'], encoding='utf-8', newline='') as output:
             return {'success': True, 'content': output.read(), 'rows': self.snapshot['rows']}
+
+    def export_to_tsv(self, result_id):
+        snapshot = self.snapshot
+        if not snapshot or snapshot['id'] != result_id:
+            return {'success': False, 'error': 'Result is no longer available. Run the query again.'}
+        too_large = {'success': False, 'error': f'This result is more than {self.CLIPBOARD_CHARS:,} characters, too large to paste. Use Download CSV instead.'}
+        csv.field_size_limit(max(csv.field_size_limit(), self.CLIPBOARD_CHARS))
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter='\t', lineterminator='\r\n')
+        with open(snapshot['path'], encoding='utf-8', newline='') as source:
+            try:
+                for row in csv.reader(source):
+                    writer.writerow(row)
+                    if output.tell() > self.CLIPBOARD_CHARS:
+                        return too_large
+            except csv.Error:
+                return too_large
+        return {'success': True, 'content': output.getvalue(), 'rows': snapshot['rows']}
+
+    def export_stages(self, stages, wanted, write):
+        self.check_stages(stages)
+        created, last = ([], len(stages) - 1)
+        self.conn.execute('BEGIN TRANSACTION')
+        try:
+            for index, (name, sql) in enumerate(stages):
+                self.require_single_select(sql, 'A recipe runs as one SELECT query per step. Use the SQL workbench for other statements.')
+                if name is None or index == last:
+                    source = sql
+                else:
+                    quoted = '"' + name + '"'
+                    self.conn.execute(f'CREATE OR REPLACE TEMP TABLE {quoted} AS {sql}')
+                    created.append(quoted)
+                    source = f'SELECT * FROM temp.main.{quoted}'
+                if index in wanted:
+                    write(index, source)
+                while len(created) > 1:
+                    self.conn.execute(f'DROP TABLE IF EXISTS temp.main.{created.pop(0)}')
+        finally:
+            try:
+                self.conn.execute('ROLLBACK')
+            except Exception:
+                pass
+
+    def export_recipe_workbook(self, stages, sheets):
+        if not isinstance(sheets, list) or not sheets or (not isinstance(stages, list)) or (not all((isinstance(item, list) and len(item) == 2 and (type(item[0]) is int) and (0 <= item[0] < len(stages)) and isinstance(item[1], str) and (0 < len(item[1]) <= 31) and (not re.search('[\\[\\]:*?/\\\\]', item[1])) for item in sheets))) or ([item[0] for item in sheets] != sorted({item[0] for item in sheets})) or (len({item[1].casefold() for item in sheets}) != len(sheets)):
+            return {'success': False, 'error': 'Choose at least one step, each with its own sheet name.'}
+        names, rows, book = (dict(sheets), [], None)
+        try:
+            from openpyxl import Workbook
+            from openpyxl.cell import WriteOnlyCell
+            from openpyxl.cell.cell import ERROR_CODES, ILLEGAL_CHARACTERS_RE
+            book = Workbook(write_only=True)
+
+            def write(index, sql):
+                name = names[index]
+                cursor = self.conn.execute(sql)
+                columns = [item[0] for item in cursor.description]
+                if len(columns) > self.XLSX_COLUMNS:
+                    raise ValueError(f'Sheet “{name}” has {len(columns):,} columns; one Excel sheet holds {self.XLSX_COLUMNS:,}. Leave that step out or use Download CSV.')
+                sheet = book.create_sheet(name)
+                cell = lambda value: self.excel_cell(sheet, value, WriteOnlyCell, ILLEGAL_CHARACTERS_RE, ERROR_CODES)
+                sheet.append([cell(str(column)) for column in columns])
+                count = 0
+                while True:
+                    batch = cursor.fetchmany(512)
+                    if not batch:
+                        break
+                    count += len(batch)
+                    if count > self.XLSX_ROWS:
+                        raise ValueError(f'Sheet “{name}” has more than {self.XLSX_ROWS:,} rows, more than one Excel sheet holds. Leave that step out or use Download CSV.')
+                    for row in batch:
+                        sheet.append([cell(value) for value in row])
+                rows.append(count)
+            self.export_stages(stages, names, write)
+            output = io.BytesIO()
+            book.save(output)
+            return {'success': True, 'content_base64': base64.b64encode(output.getvalue()).decode('ascii'), 'rows': rows}
+        except Exception as error:
+            self.discard_workbook(book)
+            return {'success': False, 'error': str(error) or f'{type(error).__name__} while building the workbook. Use Download CSV instead.'}
+
+    def export_recipe_parquet(self, stages):
+        path = '/tmp/duck_export.parquet'
+        try:
+            described = {}
+
+            def write(index, sql):
+                wanted = self.conn.execute(f'DESCRIBE {sql}').fetchall()
+                self.conn.execute(f"COPY ({sql}) TO '{path}' (FORMAT parquet)")
+                columns = self.conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{path}')").fetchall()
+                described.update(columns=[item[0] for item in columns], types=[item[1] for item in columns], rows=self.conn.execute(f"SELECT count(*) FROM read_parquet('{path}')").fetchone()[0], changed=[[before[0], before[1], after[1]] for before, after in zip(wanted, columns) if before[1] != after[1]])
+            if not isinstance(stages, list) or not stages:
+                raise ValueError('A staged recipe needs one name and query per step.')
+            self.export_stages(stages, {len(stages) - 1}, write)
+            with open(path, 'rb') as file:
+                content = file.read()
+            return {'success': True, 'content_base64': base64.b64encode(content).decode('ascii'), **described}
+        except Exception as error:
+            return {'success': False, 'error': str(error)}
+        finally:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                pass
 csv_tools = DuckDBCSVTools()
 
 def worker_call(method, args_json):
-    allowed = {'get_version', 'load_csv_file', 'load_excel_file', 'load_additional_sheet', 'reload_table_with_headers', 'drop_table', 'get_table_info', 'preview_query', 'execute_query', 'execute_recipe', 'execute_recipe_stages', 'export_to_csv', 'check_export_to_xlsx', 'export_to_xlsx'}
+    allowed = {'get_version', 'load_csv_file', 'load_excel_file', 'load_additional_sheet', 'reload_table_with_headers', 'drop_table', 'get_table_info', 'preview_query', 'execute_query', 'execute_recipe', 'execute_recipe_stages', 'export_to_csv', 'export_to_tsv', 'check_export_to_xlsx', 'export_to_xlsx', 'export_recipe_workbook', 'export_recipe_parquet'}
     if method not in allowed:
         raise ValueError('Unknown engine operation')
     result = getattr(csv_tools, method)(*json.loads(args_json))
