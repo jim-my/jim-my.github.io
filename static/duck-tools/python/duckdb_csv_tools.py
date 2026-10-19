@@ -237,6 +237,72 @@ class DuckDBCSVTools:
         except Exception as error:
             return {'success': False, 'error': str(error)}
 
+    def replace_file(self, name, content, filename):
+        path = None
+        try:
+            self.get_table_info()
+            info = self.tables.get(self.relation_key(name))
+            if not info or info.get('origin') != 'file':
+                raise ValueError('Only a loaded file you added can be replaced')
+            self.counter += 1
+            source_id = self.counter
+            registration = None
+            if info['file_type'] == 'csv':
+                if not isinstance(content, str):
+                    raise ValueError('Replace a CSV source with a CSV file')
+                path = f'/tmp/duck_source_{source_id}.csv'
+                with open(path, 'w', encoding='utf-8') as file:
+                    file.write(content)
+                select = self.csv_select(path, info['options'])
+                self.conn.execute(f'SELECT count(*) FROM {select}').fetchone()
+                statement = f'CREATE OR REPLACE VIEW {self.quote_relation(name)} AS SELECT * FROM {select}'
+                source, details = ({'path': path}, {})
+            else:
+                import pandas as pd
+                if not isinstance(content, list):
+                    raise ValueError('Replace an Excel source with an Excel file')
+                data = bytes(content)
+                sheet = info['current_sheet']
+                with pd.ExcelFile(io.BytesIO(data), engine='openpyxl') as book:
+                    sheets = book.sheet_names
+                    if sheet not in sheets:
+                        raise ValueError(f'Saved worksheet {sheet!r} is not in this workbook')
+                    frame = pd.read_excel(book, sheet_name=sheet)
+                registration = '_duck_import_frame'
+                self.conn.register(registration, frame)
+                statement = f'CREATE OR REPLACE TABLE {self.quote_relation(name)} AS SELECT * FROM {registration}'
+                source, details = ({'bytes': data}, {'available_sheets': sheets})
+            try:
+                self.conn.execute('BEGIN TRANSACTION')
+                try:
+                    self.conn.execute(statement)
+                    refreshed = self.table_metadata(name, dict(info, filename=filename, source_id=source_id, **details))
+                    self.conn.execute('COMMIT')
+                except Exception:
+                    try:
+                        self.conn.execute('ROLLBACK')
+                    except Exception:
+                        pass
+                    raise
+            finally:
+                if registration:
+                    self.conn.unregister(registration)
+            self.tables[self.relation_key(name)] = refreshed
+            self.sources[source_id] = source
+            old_id = info['source_id']
+            if not any((item['source_id'] == old_id for item in self.tables.values())):
+                old = self.sources.pop(old_id, {})
+                try:
+                    if 'path' in old and os.path.exists(old['path']):
+                        os.remove(old['path'])
+                except OSError:
+                    pass
+            return dict(refreshed, success=True, table_name=name)
+        except Exception as error:
+            if path and path not in (item.get('path') for item in self.sources.values()) and os.path.exists(path):
+                os.remove(path)
+            return {'success': False, 'error': str(error)}
+
     def drop_table(self, name):
         try:
             self.get_table_info()
@@ -614,7 +680,7 @@ class DuckDBCSVTools:
 csv_tools = DuckDBCSVTools()
 
 def worker_call(method, args_json):
-    allowed = {'get_version', 'load_csv_file', 'load_excel_file', 'load_additional_sheet', 'reload_table_with_headers', 'drop_table', 'get_table_info', 'preview_query', 'execute_query', 'execute_recipe', 'execute_recipe_stages', 'export_to_csv', 'export_to_tsv', 'check_export_to_xlsx', 'export_to_xlsx', 'export_recipe_workbook', 'export_recipe_parquet'}
+    allowed = {'get_version', 'load_csv_file', 'load_excel_file', 'load_additional_sheet', 'reload_table_with_headers', 'replace_file', 'drop_table', 'get_table_info', 'preview_query', 'execute_query', 'execute_recipe', 'execute_recipe_stages', 'export_to_csv', 'export_to_tsv', 'check_export_to_xlsx', 'export_to_xlsx', 'export_recipe_workbook', 'export_recipe_parquet'}
     if method not in allowed:
         raise ValueError('Unknown engine operation')
     result = getattr(csv_tools, method)(*json.loads(args_json))
