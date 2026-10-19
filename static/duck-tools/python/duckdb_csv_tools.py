@@ -1,4 +1,5 @@
 import base64
+import codecs
 import csv
 import datetime
 import decimal
@@ -142,7 +143,17 @@ class DuckDBCSVTools:
         delim_sql = f', delim={self.quote_literal(delimiter)}' if delimiter else ''
         return f'read_csv({self.quote_literal(path)}, header={header}, auto_detect=true, all_varchar={text}{delim_sql})'
 
-    def load_csv_file(self, content, filename, options=None, requested_name=None, reserved_names=None, origin='file'):
+    def check_utf8(self, path):
+        decoder = codecs.getincrementaldecoder('utf-8')()
+        try:
+            with open(path, 'rb') as file:
+                while (chunk := file.read(1 << 20)):
+                    decoder.decode(chunk)
+            decoder.decode(b'', final=True)
+        except UnicodeDecodeError:
+            raise ValueError('This CSV is not UTF-8 text. Save it as CSV UTF-8 and try again.') from None
+
+    def load_csv_file(self, upload, filename, options=None, requested_name=None, reserved_names=None, origin='file'):
         path = None
         created = False
         try:
@@ -151,8 +162,8 @@ class DuckDBCSVTools:
             options = options or {}
             name, source_id = self.new_name(filename, requested_name=requested_name, reserved_names=reserved_names)
             path = f'/tmp/duck_source_{source_id}.csv'
-            with open(path, 'w', encoding='utf-8') as source:
-                source.write(content)
+            os.replace(upload, path)
+            self.check_utf8(path)
             self.conn.execute(f'CREATE VIEW {self.quote_relation(name)} AS SELECT * FROM {self.csv_select(path, options)}')
             created = True
             info = self.table_metadata(name, {'filename': filename, 'file_type': 'csv', 'origin': origin, 'source_id': source_id, 'options': options, 'has_headers': options.get('has_headers', True)})
@@ -167,11 +178,10 @@ class DuckDBCSVTools:
                     os.remove(path)
             return {'success': False, 'error': str(error)}
 
-    def load_excel_file(self, content, filename, requested_name=None, requested_sheet=None, reserved_names=None):
+    def load_excel_file(self, upload, filename, requested_name=None, requested_sheet=None, reserved_names=None):
         try:
             import pandas as pd
-            data = bytes(content)
-            with pd.ExcelFile(io.BytesIO(data), engine='openpyxl') as book:
+            with pd.ExcelFile(upload, engine='openpyxl') as book:
                 sheets = book.sheet_names
                 if not sheets:
                     raise ValueError('Workbook has no worksheets')
@@ -182,8 +192,10 @@ class DuckDBCSVTools:
             name, source_id = self.new_name(filename, requested_name=requested_name, reserved_names=reserved_names)
             self.create_excel_table(name, frame)
             info = self.table_metadata(name, {'filename': filename, 'file_type': 'excel', 'origin': 'file', 'source_id': source_id, 'available_sheets': sheets, 'current_sheet': sheet})
+            path = f'/tmp/duck_source_{source_id}.xlsx'
+            os.replace(upload, path)
             self.tables[self.relation_key(name)] = info
-            self.sources[source_id] = {'bytes': data}
+            self.sources[source_id] = {'path': path}
             return dict(info, success=True, table_name=name)
         except Exception as error:
             return {'success': False, 'error': str(error)}
@@ -206,7 +218,7 @@ class DuckDBCSVTools:
                 raise ValueError('Worksheet not found')
             if any((info['source_id'] == source_id and info.get('current_sheet') == sheet for info in self.tables.values())):
                 raise ValueError('Worksheet is already loaded')
-            frame = pd.read_excel(io.BytesIO(self.sources[source_id]['bytes']), sheet_name=sheet, engine='openpyxl')
+            frame = pd.read_excel(self.sources[source_id]['path'], sheet_name=sheet, engine='openpyxl')
             name, _ = self.new_name(base['filename'], sheet, requested_name, reserved_names)
             self.create_excel_table(name, frame)
             info = self.table_metadata(name, dict(base, current_sheet=sheet))
@@ -237,7 +249,7 @@ class DuckDBCSVTools:
         except Exception as error:
             return {'success': False, 'error': str(error)}
 
-    def replace_file(self, name, content, filename):
+    def replace_file(self, upload, name, filename):
         path = None
         try:
             self.get_table_info()
@@ -248,22 +260,23 @@ class DuckDBCSVTools:
             source_id = self.counter
             registration = None
             if info['file_type'] == 'csv':
-                if not isinstance(content, str):
+                if not filename.lower().endswith('.csv'):
                     raise ValueError('Replace a CSV source with a CSV file')
                 path = f'/tmp/duck_source_{source_id}.csv'
-                with open(path, 'w', encoding='utf-8') as file:
-                    file.write(content)
+                os.replace(upload, path)
+                self.check_utf8(path)
                 select = self.csv_select(path, info['options'])
                 self.conn.execute(f'SELECT count(*) FROM {select}').fetchone()
                 statement = f'CREATE OR REPLACE VIEW {self.quote_relation(name)} AS SELECT * FROM {select}'
                 source, details = ({'path': path}, {})
             else:
                 import pandas as pd
-                if not isinstance(content, list):
+                if not filename.lower().endswith('.xlsx'):
                     raise ValueError('Replace an Excel source with an Excel file')
-                data = bytes(content)
                 sheet = info['current_sheet']
-                with pd.ExcelFile(io.BytesIO(data), engine='openpyxl') as book:
+                path = f'/tmp/duck_source_{source_id}.xlsx'
+                os.replace(upload, path)
+                with pd.ExcelFile(path, engine='openpyxl') as book:
                     sheets = book.sheet_names
                     if sheet not in sheets:
                         raise ValueError(f'Saved worksheet {sheet!r} is not in this workbook')
@@ -271,7 +284,7 @@ class DuckDBCSVTools:
                 registration = '_duck_import_frame'
                 self.conn.register(registration, frame)
                 statement = f'CREATE OR REPLACE TABLE {self.quote_relation(name)} AS SELECT * FROM {registration}'
-                source, details = ({'bytes': data}, {'available_sheets': sheets})
+                source, details = ({'path': path}, {'available_sheets': sheets})
             try:
                 self.conn.execute('BEGIN TRANSACTION')
                 try:
@@ -312,9 +325,7 @@ class DuckDBCSVTools:
             del self.tables[self.relation_key(name)]
             source_id = info['source_id']
             if not any((item['source_id'] == source_id for item in self.tables.values())):
-                source = self.sources.pop(source_id)
-                if 'path' in source:
-                    os.remove(source['path'])
+                os.remove(self.sources.pop(source_id)['path'])
             return {'success': True}
         except Exception as error:
             return {'success': False, 'error': str(error)}
