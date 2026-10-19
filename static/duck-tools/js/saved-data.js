@@ -1,0 +1,14 @@
+import{DATABASE as a}from"./file-handles.js";const s="duck-tools.";export function savedKeys(e){const o=[];for(let t=0;t<e.length;t++)e.key(t)?.startsWith(s)&&o.push(e.key(t));return o}export async function forgetSavedData(e,o,t=()=>{}){for(const r of savedKeys(e))e.removeItem(r);o&&await new Promise((r,i)=>{const n=o.deleteDatabase(a);n.onsuccess=r,n.onerror=()=>i(new Error(`The remembered files could not be removed: ${n.error?.message||"the browser refused"}.`)),n.onblocked=()=>t("Waiting for the browser to release the remembered files. If this does not finish, close your other Duck Tools tabs, or Reload.")})}function l(){let e=document.getElementById("forget-dialog");if(e)return e;e=document.createElement("dialog"),e.id="forget-dialog",e.setAttribute("aria-labelledby","forget-title"),e.setAttribute("aria-describedby","forget-description"),e.innerHTML=`<form method="dialog">
+        <span class="eyebrow">SHARED OR BORROWED COMPUTER</span><h2 id="forget-title">Forget everything saved in this browser?</h2>
+        <div id="forget-description">
+            <p>This removes what Duck Tools keeps in this browser:</p>
+            <ul><li>SQL tabs, recent queries and source names from the SQL workbench</li>
+                <li>the Studio recipe and its layout</li>
+                <li>the remembered files Studio uses to reconnect</li></ul>
+            <p>This tab then reloads empty. Files you downloaded, such as workspace and recipe files, are not affected.</p>
+            <p>Other open Duck Tools tabs keep their files and work, and save it again when it changes: close them first.</p>
+        </div>
+        <p id="forget-waiting" role="status"></p>
+        <p id="forget-error" role="alert" hidden></p>
+        <div class="forget-actions"><button value="cancel" autofocus>Cancel</button><button type="button" id="forget-confirm" class="danger">Forget everything</button><button type="button" id="forget-reload" hidden>Reload</button></div>
+    </form>`;let o=!1;return e.querySelector("#forget-confirm").onclick=async()=>{const t=e.querySelector("#forget-confirm"),r=e.querySelector("#forget-error");o=!0,t.disabled=!0,e.querySelector("[value=cancel]").disabled=!0,window.dispatchEvent(new Event("duck-tools:forget"));try{await forgetSavedData(localStorage,window.indexedDB,i=>{e.querySelector("#forget-waiting").textContent=i,e.querySelector("#forget-reload").hidden=!1}),location.reload()}catch(i){r.textContent=`${i.message} Reload to see what is still saved, then try again.`,r.hidden=!1,e.querySelector("#forget-waiting").textContent="",t.hidden=!0,e.querySelector("#forget-reload").hidden=!1,e.querySelector("#forget-reload").focus()}},e.querySelector("#forget-reload").onclick=()=>location.reload(),e.addEventListener("close",()=>{o&&!e.open&&location.reload()}),document.body.append(e),e}document.addEventListener("click",e=>{e.target.closest("[data-forget-saved-data]")&&l().showModal()});
