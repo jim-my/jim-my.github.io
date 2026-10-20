@@ -1,4 +1,3 @@
-import base64
 import codecs
 import csv
 import datetime
@@ -63,6 +62,8 @@ class DuckDBCSVTools:
     XLSX_LARGEST = 9.99999999999999e+307
     XLSX_SMALLEST = 2.2250738585072014e-308
     CLIPBOARD_CHARS = 10000000
+    WORKBOOK_PATH = '/tmp/duck_export.xlsx'
+    PARQUET_PATH = '/tmp/duck_export.parquet'
 
     def __init__(self):
         self.conn = duckdb.connect(':memory:')
@@ -561,14 +562,21 @@ class DuckDBCSVTools:
                         break
                     for row in batch:
                         sheet.append([cell(value) for value in row])
-            output = io.BytesIO()
-            book.save(output)
-            return {'success': True, 'content_base64': base64.b64encode(output.getvalue()).decode('ascii'), 'rows': snapshot['rows']}
+            book.save(self.WORKBOOK_PATH)
+            return {'success': True, 'send_file': self.send_file(self.WORKBOOK_PATH, remove=True), 'rows': snapshot['rows']}
         except Exception as error:
             self.discard_workbook(book)
             return {'success': False, 'error': str(error) or f'{type(error).__name__} while building the workbook. Use Download CSV instead.'}
 
+    def send_file(self, path, remove):
+        return {'path': path, 'remove': remove}
+
     def discard_workbook(self, book):
+        try:
+            if os.path.exists(self.WORKBOOK_PATH):
+                os.remove(self.WORKBOOK_PATH)
+        except OSError:
+            pass
         for sheet in book.worksheets if book is not None else ():
             writer = getattr(sheet, '_writer', None)
             if writer is not None:
@@ -581,8 +589,7 @@ class DuckDBCSVTools:
     def export_to_csv(self, result_id):
         if not self.snapshot or self.snapshot['id'] != result_id:
             return {'success': False, 'error': 'Result is no longer available. Run the query again.'}
-        with open(self.snapshot['path'], encoding='utf-8', newline='') as output:
-            return {'success': True, 'content': output.read(), 'rows': self.snapshot['rows']}
+        return {'success': True, 'send_file': self.send_file(self.snapshot['path'], remove=False), 'rows': self.snapshot['rows']}
 
     def export_to_tsv(self, result_id):
         snapshot = self.snapshot
@@ -657,15 +664,14 @@ class DuckDBCSVTools:
                         sheet.append([cell(value) for value in row])
                 rows.append(count)
             self.export_stages(stages, names, write)
-            output = io.BytesIO()
-            book.save(output)
-            return {'success': True, 'content_base64': base64.b64encode(output.getvalue()).decode('ascii'), 'rows': rows}
+            book.save(self.WORKBOOK_PATH)
+            return {'success': True, 'send_file': self.send_file(self.WORKBOOK_PATH, remove=True), 'rows': rows}
         except Exception as error:
             self.discard_workbook(book)
             return {'success': False, 'error': str(error) or f'{type(error).__name__} while building the workbook. Use Download CSV instead.'}
 
     def export_recipe_parquet(self, stages):
-        path = '/tmp/duck_export.parquet'
+        path = self.PARQUET_PATH
         try:
             described = {}
 
@@ -677,17 +683,14 @@ class DuckDBCSVTools:
             if not isinstance(stages, list) or not stages:
                 raise ValueError('A staged recipe needs one name and query per step.')
             self.export_stages(stages, {len(stages) - 1}, write)
-            with open(path, 'rb') as file:
-                content = file.read()
-            return {'success': True, 'content_base64': base64.b64encode(content).decode('ascii'), **described}
+            return {'success': True, 'send_file': self.send_file(path, remove=True), **described}
         except Exception as error:
-            return {'success': False, 'error': str(error)}
-        finally:
             try:
                 if os.path.exists(path):
                     os.remove(path)
             except OSError:
                 pass
+            return {'success': False, 'error': str(error)}
 csv_tools = DuckDBCSVTools()
 
 def worker_call(method, args_json):
