@@ -66,7 +66,7 @@ class DuckDBCSVTools:
     PARQUET_PATH = '/tmp/duck_export.parquet'
 
     def __init__(self):
-        self.conn = duckdb.connect(':memory:')
+        self.conn = duckdb.connect(':memory:', config={'autoinstall_known_extensions': False, 'autoload_known_extensions': False})
         self.tables = {}
         self.sources = {}
         self.counter = 0
