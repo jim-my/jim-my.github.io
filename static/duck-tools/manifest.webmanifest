@@ -1,0 +1,15 @@
+{
+  "id": "./",
+  "name": "Duck Tools",
+  "short_name": "Duck Tools",
+  "description": "Local CSV recipes and SQL, ready to use offline.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f9f7",
+  "theme_color": "#146b50",
+  "icons": [
+    { "src": "icons/app-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/app-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}
